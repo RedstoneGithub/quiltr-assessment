@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -20,16 +21,18 @@ PRIMARY_API_KEY = os.getenv("PRIMARY_API_KEY", API_KEY)
 BACKUP_API_KEY = os.getenv("BACKUP_API_KEY", API_KEY)
 
 primary_server = os.getenv(
-    "PRIMARY_LLM_URL"
-)
+    "PRIMARY_LLM_URL",
+    "https://openrouter.ai/api/v1/chat/completions"
+) or "https://openrouter.ai/api/v1/chat/completions"
 backup_server = os.getenv(
-    "BACKUP_LLM_URL"
-)
+    "BACKUP_LLM_URL",
+    "https://openrouter.ai/api/v1/chat/completions"
+) or "https://openrouter.ai/api/v1/chat/completions"
 
 primary_model = os.getenv("PRIMARY_MODEL", "qwen3.7-flash")
 backup_model = os.getenv("BACKUP_MODEL", "qwen3.8-flash")
 
-RATE_LIMIT = 50_000
+RATE_LIMIT = 1500 #50_000
 WINDOW_SECONDS = 60
 PRIMARY_TIMEOUT = 3.0
 BACKUP_TIMEOUT = 10.0
@@ -103,6 +106,8 @@ class RateLimiter:
                 (tenantId, windowStart)
             ).fetchone()
             usedTokens = row[0]
+
+            #print("Used", usedTokens, "tokens +", tokens)
 
             if usedTokens + tokens > self.tokenLimit:
                 database.rollback()
@@ -243,7 +248,8 @@ async def generate(
             requestId,
             reservedTokens
         )
-    except sqlite3.Error:
+    except sqlite3.Error as error:
+        print(f"Rate limiter database error: {error}", file=sys.stderr)
         return createGatewayError(
             503,
             "GATEWAY_UNAVAILABLE",
@@ -275,9 +281,11 @@ async def generate(
             timeout=PRIMARY_TIMEOUT
         )
         useBackup = response.status_code == 429
-    except (TimeoutError, httpx.TimeoutException):
+    except (TimeoutError, httpx.TimeoutException) as error:
+        print(f"Primary provider timed out: {error}", file=sys.stderr)
         useBackup = True
-    except httpx.HTTPError:
+    except httpx.HTTPError as error:
+        print(f"Primary provider HTTP error: {error}", file=sys.stderr)
         return createGatewayError(
             502,
             "UPSTREAM_UNAVAILABLE",
@@ -295,7 +303,8 @@ async def generate(
                 max_tokens,
                 BACKUP_TIMEOUT
             )
-        except (TimeoutError, httpx.HTTPError):
+        except (TimeoutError, httpx.HTTPError) as error:
+            print(f"Backup provider HTTP error: {error}", file=sys.stderr)
             return createGatewayError(
                 502,
                 "UPSTREAM_UNAVAILABLE",
@@ -303,6 +312,12 @@ async def generate(
                 requestId
             )
     if not response.is_success:
+        provider = "backup" if useBackup else "primary"
+        print(
+            f"{provider.capitalize()} provider returned HTTP "
+            f"{response.status_code}",
+            file=sys.stderr
+        )
         return createGatewayError(
             502,
             "UPSTREAM_UNAVAILABLE",
@@ -312,7 +327,8 @@ async def generate(
 
     try:
         responseData = response.json()
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as error:
+        print(f"Invalid upstream JSON response: {error}", file=sys.stderr)
         return createGatewayError(
             502,
             "INVALID_UPSTREAM_RESPONSE",
@@ -323,7 +339,8 @@ async def generate(
     actualTokens = getActualTokens(responseData, msg)
     try:
         await rateLimiter.update(requestId, actualTokens)
-    except sqlite3.Error:
+    except sqlite3.Error as error:
+        print(f"Rate limiter database error: {error}", file=sys.stderr)
         return createGatewayError(
             503,
             "GATEWAY_UNAVAILABLE",

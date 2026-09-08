@@ -1,7 +1,8 @@
-from typing import Literal, Annotated
+from typing import Annotated
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     StringConstraints
 )
@@ -13,7 +14,7 @@ CustomerId = Annotated[
 
 Amount = Annotated[
     float,
-    Field(gt=0)
+    Field(gt=0, allow_inf_nan=False)
 ]
 
 Reason = Annotated[
@@ -22,9 +23,13 @@ Reason = Annotated[
 ]
 
 class CustomerRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     customer_id: CustomerId
-        
+
 class Refund(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     customer_id: CustomerId
     amount: Amount
     reason: Reason
