@@ -18,7 +18,7 @@ dotenv.load_dotenv()
 
 API_KEY = os.getenv("OPENAI_API_KEY", "")
 PRIMARY_API_KEY = os.getenv("PRIMARY_API_KEY", API_KEY)
-BACKUP_API_KEY = os.getenv("BACKUP_API_KEY", API_KEY)
+BACKUP_API_KEY = os.getenv("BACKUP_API_KEY", "")
 
 primary_server = os.getenv(
     "PRIMARY_LLM_URL",
@@ -26,13 +26,13 @@ primary_server = os.getenv(
 ) or "https://openrouter.ai/api/v1/chat/completions"
 backup_server = os.getenv(
     "BACKUP_LLM_URL",
-    "https://openrouter.ai/api/v1/chat/completions"
-) or "https://openrouter.ai/api/v1/chat/completions"
+    "https://api.openai.com/v1/chat/completions"
+) or "https://api.openai.com/v1/chat/completions"
 
-primary_model = os.getenv("PRIMARY_MODEL", "qwen3.7-flash")
-backup_model = os.getenv("BACKUP_MODEL", "qwen3.8-flash")
+primary_model = os.getenv("PRIMARY_MODEL", "qwen/qwen3.7-flash")
+backup_model = os.getenv("BACKUP_MODEL", "gpt-4o-mini")
 
-RATE_LIMIT = 1500 #50_000
+RATE_LIMIT = 50_000
 WINDOW_SECONDS = 60
 PRIMARY_TIMEOUT = 3.0
 BACKUP_TIMEOUT = 10.0

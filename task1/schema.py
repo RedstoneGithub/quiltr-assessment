@@ -4,7 +4,8 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    StringConstraints
+    StringConstraints,
+    WithJsonSchema
 )
 
 CustomerId = Annotated[
@@ -20,6 +21,32 @@ Amount = Annotated[
 Reason = Annotated[
     str,
     Field(min_length=10)
+]
+
+# These types expose the same constraints in tools/list. Validation is still
+# performed by the models below so invalid input can return JSON-RPC -32602.
+CustomerIdInput = Annotated[
+    str,
+    WithJsonSchema({
+        "type": "string",
+        "pattern": r"^CUST-\d{5}$"
+    })
+]
+
+AmountInput = Annotated[
+    float,
+    WithJsonSchema({
+        "type": "number",
+        "exclusiveMinimum": 0
+    })
+]
+
+ReasonInput = Annotated[
+    str,
+    WithJsonSchema({
+        "type": "string",
+        "minLength": 10
+    })
 ]
 
 class CustomerRecord(BaseModel):

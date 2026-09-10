@@ -25,9 +25,13 @@ CARD_RE = re.compile(
     r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"
 )
 
+primary_server = os.getenv(
+    "PRIMARY_LLM_URL"
+)
+
 app = FastAPI()
 client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
+    base_url=primary_server,
     api_key=os.environ.get("OPENAI_API_KEY")
 )
 
@@ -118,7 +122,7 @@ async def generateResponse(request: str):
         redactor = Redactor()
 
         stream = await client.responses.create(
-            model="qwen3.8-flash",
+            model="qwen/qwen3.8-flash",
             input=request,
             stream=True
         )
