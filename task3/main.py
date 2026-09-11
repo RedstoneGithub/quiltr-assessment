@@ -1,11 +1,11 @@
 import os
 import re
 
+import dotenv
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 
-import dotenv
 dotenv.load_dotenv()
 
 EMAIL_RE = re.compile(
@@ -21,19 +21,17 @@ SSN_RE = re.compile(
     r"(?!\d)"
 )
 
-CARD_RE = re.compile(
-    r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"
-)
+CARD_RE = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
 
-primary_server = os.getenv(
-    "PRIMARY_LLM_URL"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+primary_server = (
+    os.getenv("PRIMARY_LLM_URL", OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
 )
+primary_model = os.getenv("PRIMARY_MODEL", "qwen/qwen3.8-flash")
 
 app = FastAPI()
-client = AsyncOpenAI(
-    base_url=primary_server,
-    api_key=os.environ.get("OPENAI_API_KEY")
-)
+client = AsyncOpenAI(base_url=primary_server, api_key=os.environ.get("OPENAI_API_KEY"))
 
 
 class Redactor:
@@ -122,9 +120,7 @@ async def generateResponse(request: str):
         redactor = Redactor()
 
         stream = await client.responses.create(
-            model="qwen/qwen3.8-flash",
-            input=request,
-            stream=True
+            model=primary_model, input=request, stream=True
         )
 
         async for event in stream:

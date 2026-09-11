@@ -9,25 +9,33 @@ import uuid
 from pathlib import Path
 from typing import Annotated
 
+import dotenv
+import httpx
 from fastapi import FastAPI, Header
 from fastapi.responses import JSONResponse
-import httpx
 
-import dotenv
 dotenv.load_dotenv()
 
 API_KEY = os.getenv("OPENAI_API_KEY", "")
 PRIMARY_API_KEY = os.getenv("PRIMARY_API_KEY", API_KEY)
 BACKUP_API_KEY = os.getenv("BACKUP_API_KEY", "")
 
-primary_server = os.getenv(
-    "PRIMARY_LLM_URL",
-    "https://openrouter.ai/api/v1/chat/completions"
-) or "https://openrouter.ai/api/v1/chat/completions"
-backup_server = os.getenv(
-    "BACKUP_LLM_URL",
-    "https://api.openai.com/v1/chat/completions"
-) or "https://api.openai.com/v1/chat/completions"
+
+def chatCompletionsUrl(baseUrl: str) -> str:
+    normalized = baseUrl.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    return normalized + "/chat/completions"
+
+
+primary_server = chatCompletionsUrl(
+    os.getenv("PRIMARY_LLM_URL", "https://openrouter.ai/api/v1")
+    or "https://openrouter.ai/api/v1"
+)
+backup_server = chatCompletionsUrl(
+    os.getenv("BACKUP_LLM_URL", "https://api.openai.com/v1")
+    or "https://api.openai.com/v1"
+)
 
 primary_model = os.getenv("PRIMARY_MODEL", "qwen/qwen3.7-flash")
 backup_model = os.getenv("BACKUP_MODEL", "gpt-4o-mini")
@@ -37,8 +45,7 @@ WINDOW_SECONDS = 60
 PRIMARY_TIMEOUT = 3.0
 BACKUP_TIMEOUT = 10.0
 DATABASE_PATH = os.getenv(
-    "RATE_LIMIT_DATABASE",
-    str(Path(__file__).with_name("db.sqlite3"))
+    "RATE_LIMIT_DATABASE", str(Path(__file__).with_name("db.sqlite3"))
 )
 
 app = FastAPI()
@@ -53,7 +60,8 @@ class RateLimiter:
         self.initializeLock = asyncio.Lock()
 
     def setupDatabase(self):
-        with sqlite3.connect(self.databasePath) as database:
+        database = sqlite3.connect(self.databasePath)
+        try:
             database.execute("PRAGMA journal_mode=WAL")
             database.execute(
                 """
@@ -71,6 +79,9 @@ class RateLimiter:
                 ON usage_events (tenant_id, created_at)
                 """
             )
+            database.commit()
+        finally:
+            database.close()
 
     async def initialize(self):
         if self.initialized:
@@ -84,17 +95,12 @@ class RateLimiter:
     def reserveTokens(self, tenantId: str, requestId: str, tokens: int):
         now = time.time()
         windowStart = now - WINDOW_SECONDS
-        database = sqlite3.connect(
-            self.databasePath,
-            timeout=5,
-            isolation_level=None
-        )
+        database = sqlite3.connect(self.databasePath, timeout=5, isolation_level=None)
 
         try:
             database.execute("BEGIN IMMEDIATE")
             database.execute(
-                "DELETE FROM usage_events WHERE created_at < ?",
-                (windowStart,)
+                "DELETE FROM usage_events WHERE created_at < ?", (windowStart,)
             )
 
             row = database.execute(
@@ -103,11 +109,11 @@ class RateLimiter:
                 FROM usage_events
                 WHERE tenant_id = ? AND created_at >= ?
                 """,
-                (tenantId, windowStart)
+                (tenantId, windowStart),
             ).fetchone()
             usedTokens = row[0]
 
-            #print("Used", usedTokens, "tokens +", tokens)
+            # print("Used", usedTokens, "tokens +", tokens)
 
             if usedTokens + tokens > self.tokenLimit:
                 database.rollback()
@@ -119,7 +125,7 @@ class RateLimiter:
                     (request_id, tenant_id, created_at, tokens)
                 VALUES (?, ?, ?, ?)
                 """,
-                (requestId, tenantId, now, tokens)
+                (requestId, tenantId, now, tokens),
             )
             database.commit()
             return True
@@ -131,19 +137,18 @@ class RateLimiter:
 
     async def reserve(self, tenantId: str, requestId: str, tokens: int):
         await self.initialize()
-        return await asyncio.to_thread(
-            self.reserveTokens,
-            tenantId,
-            requestId,
-            tokens
-        )
+        return await asyncio.to_thread(self.reserveTokens, tenantId, requestId, tokens)
 
     def updateTokens(self, requestId: str, tokens: int):
-        with sqlite3.connect(self.databasePath) as database:
+        database = sqlite3.connect(self.databasePath)
+        try:
             database.execute(
                 "UPDATE usage_events SET tokens = ? WHERE request_id = ?",
-                (tokens, requestId)
+                (tokens, requestId),
             )
+            database.commit()
+        finally:
+            database.close()
 
     async def update(self, requestId: str, tokens: int):
         await asyncio.to_thread(self.updateTokens, requestId, tokens)
@@ -163,35 +168,25 @@ def getTenantId(apiKey: str):
 def createGatewayError(statusCode: int, code: str, message: str, requestId: str):
     return JSONResponse(
         status_code=statusCode,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "request_id": requestId
-            }
-        }
+        content={"error": {"code": code, "message": message, "request_id": requestId}},
     )
 
 
-async def callModel(server: str, apiKey: str, model: str, msg: str,
-                    maxTokens: int, timeout: float):
+async def callModel(
+    server: str, apiKey: str, model: str, msg: str, maxTokens: int, timeout: float
+):
     return await client.post(
         url=server,
         headers={
             "Authorization": "Bearer " + apiKey,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         },
         json={
             "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": msg
-                }
-            ],
-            "max_tokens": maxTokens
+            "messages": [{"role": "user", "content": msg}],
+            "max_tokens": maxTokens,
         },
-        timeout=timeout
+        timeout=timeout,
     )
 
 
@@ -217,44 +212,41 @@ async def shutdown():
 
 @app.post("/generate")
 async def generate(
-    msg: str,
-    max_tokens: int = 1000,
-    x_api_key: Annotated[str | None, Header()] = None
+    msg: str, max_tokens: int = 1000, x_api_key: Annotated[str | None, Header()] = None
 ):
     requestId = str(uuid.uuid4())
 
     if not x_api_key:
         return createGatewayError(
-            401,
-            "UNAUTHORIZED",
-            "A tenant API key is required",
-            requestId
+            401, "UNAUTHORIZED", "A tenant API key is required", requestId
         )
 
     if max_tokens < 1:
         return createGatewayError(
-            400,
-            "INVALID_REQUEST",
-            "max_tokens must be greater than zero",
-            requestId
+            400, "INVALID_REQUEST", "max_tokens must be greater than zero", requestId
+        )
+
+    if not PRIMARY_API_KEY:
+        print("Primary provider API key is not configured", file=sys.stderr)
+        return createGatewayError(
+            503,
+            "GATEWAY_UNAVAILABLE",
+            "The gateway is temporarily unavailable",
+            requestId,
         )
 
     tenantId = getTenantId(x_api_key)
     reservedTokens = countTokens(msg) + max_tokens
 
     try:
-        allowed = await rateLimiter.reserve(
-            tenantId,
-            requestId,
-            reservedTokens
-        )
+        allowed = await rateLimiter.reserve(tenantId, requestId, reservedTokens)
     except sqlite3.Error as error:
         print(f"Rate limiter database error: {error}", file=sys.stderr)
         return createGatewayError(
             503,
             "GATEWAY_UNAVAILABLE",
             "The gateway is temporarily unavailable",
-            requestId
+            requestId,
         )
 
     if not allowed:
@@ -262,7 +254,7 @@ async def generate(
             429,
             "RATE_LIMIT_EXCEEDED",
             "The tenant token limit has been exceeded",
-            requestId
+            requestId,
         )
 
     response = None
@@ -276,9 +268,9 @@ async def generate(
                 primary_model,
                 msg,
                 max_tokens,
-                PRIMARY_TIMEOUT
+                PRIMARY_TIMEOUT,
             ),
-            timeout=PRIMARY_TIMEOUT
+            timeout=PRIMARY_TIMEOUT,
         )
         useBackup = response.status_code == 429
     except (TimeoutError, httpx.TimeoutException) as error:
@@ -290,10 +282,18 @@ async def generate(
             502,
             "UPSTREAM_UNAVAILABLE",
             "The generation service is temporarily unavailable",
-            requestId
+            requestId,
         )
 
     if useBackup:
+        if not BACKUP_API_KEY:
+            print("Backup provider API key is not configured", file=sys.stderr)
+            return createGatewayError(
+                503,
+                "GATEWAY_UNAVAILABLE",
+                "The gateway is temporarily unavailable",
+                requestId,
+            )
         try:
             response = await callModel(
                 backup_server,
@@ -301,7 +301,7 @@ async def generate(
                 backup_model,
                 msg,
                 max_tokens,
-                BACKUP_TIMEOUT
+                BACKUP_TIMEOUT,
             )
         except (TimeoutError, httpx.HTTPError) as error:
             print(f"Backup provider HTTP error: {error}", file=sys.stderr)
@@ -309,20 +309,19 @@ async def generate(
                 502,
                 "UPSTREAM_UNAVAILABLE",
                 "The generation service is temporarily unavailable",
-                requestId
+                requestId,
             )
     if not response.is_success:
         provider = "backup" if useBackup else "primary"
         print(
-            f"{provider.capitalize()} provider returned HTTP "
-            f"{response.status_code}",
-            file=sys.stderr
+            f"{provider.capitalize()} provider returned HTTP {response.status_code}",
+            file=sys.stderr,
         )
         return createGatewayError(
             502,
             "UPSTREAM_UNAVAILABLE",
             "The generation service is temporarily unavailable",
-            requestId
+            requestId,
         )
 
     try:
@@ -333,7 +332,16 @@ async def generate(
             502,
             "INVALID_UPSTREAM_RESPONSE",
             "The generation service returned an invalid response",
-            requestId
+            requestId,
+        )
+
+    if not isinstance(responseData, dict):
+        print("Upstream response JSON was not an object", file=sys.stderr)
+        return createGatewayError(
+            502,
+            "INVALID_UPSTREAM_RESPONSE",
+            "The generation service returned an invalid response",
+            requestId,
         )
 
     actualTokens = getActualTokens(responseData, msg)
@@ -345,7 +353,7 @@ async def generate(
             503,
             "GATEWAY_UNAVAILABLE",
             "The gateway is temporarily unavailable",
-            requestId
+            requestId,
         )
 
     return JSONResponse(content=responseData)

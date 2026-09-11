@@ -1,5 +1,7 @@
-from pydantic import BaseModel, ConfigDict
 from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict
+
 
 class Body(BaseModel):
     model_config = ConfigDict(extra="allow")
